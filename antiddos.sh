@@ -2,7 +2,7 @@
 
 # === Cek root ===
 if [ "$EUID" -ne 0 ]; then
-  echo "❌ Harus dijalankan sebagai root!"
+  echo -e "\033[1;31m❌ Harus dijalankan sebagai root!\033[0m"
   exit 1
 fi
 
@@ -69,12 +69,12 @@ const rateLimit = {};
 
 function log(message) {
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log(`[${timestamp}] ${message}`);
+    console.log(\`[\${timestamp}] \${message}\`);
 }
 
 function sendToDiscord(ip, attackType) {
     const timestamp = new Date().toISOString();
-    const message = `\`[ANTI-DDOS]\` \`${attackType}\` terdeteksi dari \`${ip}\`\n\n🕒 Waktu: ${new Date().toLocaleString()}`;
+    const message = \`\`[ANTI-DDOS]\` \`\${attackType}\` terdeteksi dari \`\${ip}\`\n\n🕒 Waktu: \${new Date().toLocaleString()}\`;
     const data = {
         embeds: [{
             title: "🚨 Serangan DDoS Terdeteksi",
@@ -86,28 +86,30 @@ function sendToDiscord(ip, attackType) {
     };
 
     axios.post(DISCORD_WEBHOOK, data).catch(err => {
-        log(`[ERROR] Gagal kirim ke Discord: ${err.message}`);
+        log(\`[ERROR] Gagal kirim ke Discord: \${err.message}\`);
     });
 }
 
 function blockIP(ip) {
     if (isBlocked(ip)) return;
 
-    log(`[BLOKIR] Mem-block IP ${ip}`);
+    log(\`[BLOKIR] Mem-block IP \${ip}\`);
 
     try {
-        execSync(`nft add rule inet filter input ip saddr ${ip} drop`, { stdio: 'ignore' });
-        execSync(`ipset add blocked_ips ${ip} timeout ${BLOCK_DURATION}`, { stdio: 'ignore' });
-    } catch {}
+        execSync(\`nft add rule inet filter input ip saddr \${ip} drop\`, { stdio: 'ignore' });
+        execSync(\`ipset add blocked_ips \${ip} timeout \${BLOCK_DURATION}\`, { stdio: 'ignore' });
+    } catch (err) {
+        log(\`[ERROR] Gagal block IP \${ip}: \${err.message}\`);
+    }
 
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    fs.appendFileSync(LOG_FILE, `${timestamp} | BLOKIR | ${ip} | Jenis: DDoS\n`);
+    fs.appendFileSync(LOG_FILE, \`\${timestamp} | BLOKIR | \${ip} | Jenis: DDoS\n\`);
     sendToDiscord(ip, "DDoS Attack");
 }
 
 function isBlocked(ip) {
     try {
-        const output = execSync(`ipset test blocked_ips ${ip}`, { stdio: 'pipe' }).toString();
+        const output = execSync(\`ipset test blocked_ips \${ip}\`, { stdio: 'pipe' }).toString();
         return output.includes("is in set");
     } catch {
         return false;
@@ -147,18 +149,18 @@ function monitorKernelLogs() {
         data.toString().split('\n').forEach(line => {
             const ip = extractIP(line);
             if (ip && /icmp-flood|syn-flood|udp-flood/.test(line)) {
-                log(`[ALERT] Potensi DDoS dari IP: ${ip}`);
+                log(\`[ALERT] Potensi DDoS dari IP: \${ip}\`);
                 if (!rateLimited(ip)) {
                     blockIP(ip);
                 } else {
-                    log(`[RATE-LIMIT] IP ${ip} dilewati karena melebihi limit blokir per menit.`);
+                    log(\`[RATE-LIMIT] IP \${ip} dilewati karena melebihi limit blokir per menit.\`);
                 }
             }
         });
     });
 
-    journal.stderr.on('data', (data) => log(`[ERROR] journalctl stderr: ${data}`));
-    journal.on('close', code => log(`[INFO] Proses journalctl ditutup dengan kode: ${code}`));
+    journal.stderr.on('data', (data) => log(\`[ERROR] journalctl stderr: \${data}\`));
+    journal.on('close', code => log(\`[INFO] Proses journalctl ditutup dengan kode: \${code}\`));
 }
 
 monitorKernelLogs();
@@ -190,7 +192,7 @@ systemctl daemon-reload
 # === Buat nftables rules ===
 echo -e "\n🧱 Membuat nftables rules..."
 cat > "$NFTABLES_SCRIPT" <<'EOF'
-#!/usr/sbin/nft -f
+#!/usr/bin/nft -f
 
 flush ruleset
 
@@ -211,7 +213,7 @@ $NFTABLES_SCRIPT
 echo -e "\n🔁 Membuat ipset init script..."
 cat > "$IPSET_INIT" <<'EOF'
 #!/bin/bash
-ipset create blocked_ips hash:ip timeout 3600 2>/dev/null || true
+ipset create blocked_ips hash:ip timeout 3600 2>/dev/null || ipset flush blocked_ips
 nft add rule inet filter input ip saddr @blocked_ips drop 2>/dev/null || true
 EOF
 
@@ -224,6 +226,11 @@ chmod 644 "$LOG_FILE"
 echo -e "\n🟢 Mengaktifkan service systemd..."
 systemctl enable antiddosl3l4
 systemctl start antiddosl3l4
+
+# === Enable dan Restart nftables agar rules persisten
+echo -e "\n🔁 Mengaktifkan nftables..."
+systemctl enable nftables
+systemctl restart nftables
 
 echo -e "\n✅ INSTALASI SELESAI!"
 echo -e "📌 Anda bisa menggunakan:"
