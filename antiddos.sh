@@ -43,12 +43,7 @@ IPSET_INIT="/etc/nftables/ipset-init.sh"
 
 # === Instalasi Dependensi ===
 echo -e "\n🔧 Menginstal dependensi..."
-apt update && apt install -y curl nftables ipset build-essential
-
-# === Instalasi Node.js ===
-echo -e "\n🧱 Menginstal Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_20.x  | sudo -E bash -
-apt install -y nodejs
+apt update && apt install -y curl nftables ipset build-essential nodejs npm
 
 # === Instalasi axios untuk Node.js ===
 npm install -g axios
@@ -58,72 +53,69 @@ mkdir -p /etc/nftables/
 
 # === Buat Node.js Script ===
 echo -e "\n📄 Membuat Node.js script..."
-cat > $SCRIPT_PATH <<'EOF'
+cat > "$SCRIPT_PATH" <<EOF
 #!/usr/bin/env node
 
-const { exec } = require('child_process');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const axios = require('axios');
 
-// === Konfigurasi ===
-const DISCORD_WEBHOOK = "${DISCORD_WEBHOOK}";
-const BLOCK_DURATION = 3600; // 1 jam
+const DISCORD_WEBHOOK = "$DISCORD_WEBHOOK";
+const BLOCK_DURATION = 3600;
 const MAX_BLOCK_PER_MIN = 5;
-const LOG_FILE = "${LOG_FILE}";
+const LOG_FILE = "$LOG_FILE";
 
-// === Variabel Internal ===
-const blockedIPs = {};
 const rateLimit = {};
 
 function log(message) {
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log(\`[\${timestamp}] \${message}\`);
+    console.log(`[${timestamp}] ${message}`);
 }
 
 function sendToDiscord(ip, attackType) {
     const timestamp = new Date().toISOString();
-    const message = \`\`[ANTI-DDOS]\` \`\${attackType}\` terdeteksi dari \`\${ip}\`\n\n🕒 Waktu: \${new Date().toLocaleString()}\`;
+    const message = `\`[ANTI-DDOS]\` \`${attackType}\` terdeteksi dari \`${ip}\`\n\n🕒 Waktu: ${new Date().toLocaleString()}`;
     const data = {
         embeds: [{
             title: "🚨 Serangan DDoS Terdeteksi",
             description: message,
             color: 15158332,
             footer: { text: "Anti-DDoS Final • Pterodactyl Node" },
-            timestamp: timestamp
+            timestamp
         }]
     };
 
     axios.post(DISCORD_WEBHOOK, data).catch(err => {
-        log(\`[ERROR] Gagal kirim ke Discord: \${err.message}\`);
+        log(`[ERROR] Gagal kirim ke Discord: ${err.message}`);
     });
 }
 
 function blockIP(ip) {
     if (isBlocked(ip)) return;
 
-    log(\`[BLOKIR] Mem-block IP \${ip}\`);
+    log(`[BLOKIR] Mem-block IP ${ip}`);
 
-    execSync(\`nft add rule inet filter input ip saddr \${ip} drop\`, { stdio: 'ignore' });
-    execSync(\`ipset add blocked_ips \${ip} timeout \${BLOCK_DURATION}\`, { stdio: 'ignore' });
+    try {
+        execSync(`nft add rule inet filter input ip saddr ${ip} drop`, { stdio: 'ignore' });
+        execSync(`ipset add blocked_ips ${ip} timeout ${BLOCK_DURATION}`, { stdio: 'ignore' });
+    } catch {}
 
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const logEntry = \`\${timestamp} | BLOKIR | \${ip} | Jenis: DDoS\n\`;
-    fs.appendFileSync(LOG_FILE, logEntry);
-
+    fs.appendFileSync(LOG_FILE, `${timestamp} | BLOKIR | ${ip} | Jenis: DDoS\n`);
     sendToDiscord(ip, "DDoS Attack");
 }
 
 function isBlocked(ip) {
     try {
-        const result = execSync(\`ipset test blocked_ips \${ip}\`, { stdio: 'pipe' }).stderr.toString();
-        return result.includes("is in set");
-    } catch (e) {
+        const output = execSync(`ipset test blocked_ips ${ip}`, { stdio: 'pipe' }).toString();
+        return output.includes("is in set");
+    } catch {
         return false;
     }
 }
 
 function extractIP(line) {
-    const match = line.match(/SRC=(\\d+\\.\\d+\\.\\d+\\.\\d+)/);
+    const match = line.match(/SRC=(\d+\.\d+\.\d+\.\d+)/);
     return match ? match[1] : null;
 }
 
@@ -131,7 +123,7 @@ function rateLimited(ip) {
     const now = Date.now();
     if (rateLimit[ip]) {
         if (now - rateLimit[ip].time < 60000) {
-            rateLimit[ip].count += 1;
+            rateLimit[ip].count++;
             if (rateLimit[ip].count >= MAX_BLOCK_PER_MIN) {
                 rateLimit[ip].count = 0;
                 rateLimit[ip].time = now;
@@ -148,58 +140,42 @@ function rateLimited(ip) {
 
 function monitorKernelLogs() {
     log("[INFO] Menjalankan Anti-DDoS L3/L4 Final Edition...");
+    const { spawn } = require('child_process');
+    const journal = spawn('journalctl', ['-kf', '_TRANSPORT=kernel']);
 
-    const cmd = "journalctl -kf _TRANSPORT=kernel-ring-buffer";
-    const process = exec(cmd);
-
-    process.stdout.on('data', (data) => {
-        const lines = data.toString().split('\\n');
-        lines.forEach(line => {
-            if (!line.trim()) return;
+    journal.stdout.on('data', (data) => {
+        data.toString().split('\n').forEach(line => {
             const ip = extractIP(line);
             if (ip && /icmp-flood|syn-flood|udp-flood/.test(line)) {
-                log(\`[ALERT] Potensi DDoS dari IP: \${ip}\`);
+                log(`[ALERT] Potensi DDoS dari IP: ${ip}`);
                 if (!rateLimited(ip)) {
                     blockIP(ip);
                 } else {
-                    log(\`[RATE-LIMIT] IP \${ip} dilewati karena melebihi limit blokir per menit.\`);
+                    log(`[RATE-LIMIT] IP ${ip} dilewati karena melebihi limit blokir per menit.`);
                 }
             }
         });
     });
 
-    process.stderr.on('data', (data) => {
-        log(\`[ERROR] journalctl stderr: \${data}\`);
-    });
-
-    process.on('close', (code) => {
-        log(\`[INFO] Proses journalctl ditutup dengan kode: \${code}\`);
-    });
-}
-
-function execSync(command, options = {}) {
-    try {
-        return exec(command, options);
-    } catch (e) {
-        log(\`[ERROR] Eksekusi gagal: \${command} - \${e.message}\`);
-    }
+    journal.stderr.on('data', (data) => log(`[ERROR] journalctl stderr: ${data}`));
+    journal.on('close', code => log(`[INFO] Proses journalctl ditutup dengan kode: ${code}`));
 }
 
 monitorKernelLogs();
 EOF
 
-chmod +x $SCRIPT_PATH
-chown root:root $SCRIPT_PATH
+chmod +x "$SCRIPT_PATH"
+chown root:root "$SCRIPT_PATH"
 
-# === Buat Service Systemd ===
+# === Buat systemd service ===
 echo -e "\n🔧 Membuat systemd service..."
-cat > $SERVICE_PATH <<EOF
+cat > "$SERVICE_PATH" <<EOF
 [Unit]
 Description=Anti-DDoS Final Edition for Pterodactyl Game Hosting
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node ${SCRIPT_PATH}
+ExecStart=/usr/bin/node $SCRIPT_PATH
 Restart=on-failure
 RestartSec=5s
 User=root
@@ -208,12 +184,12 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-chmod 644 $SERVICE_PATH
+chmod 644 "$SERVICE_PATH"
 systemctl daemon-reload
 
 # === Buat nftables rules ===
 echo -e "\n🧱 Membuat nftables rules..."
-cat > $NFTABLES_SCRIPT <<'EOF'
+cat > "$NFTABLES_SCRIPT" <<'EOF'
 #!/usr/sbin/nft -f
 
 flush ruleset
@@ -221,47 +197,36 @@ flush ruleset
 table inet filter {
     chain input {
         type filter hook input priority 0; policy accept;
-
-        # ICMP Flood Protection
         ip protocol icmp limit rate 10/second burst 20 packets counter log prefix "icmp-flood: " drop
-
-        # SYN Flood Protection
         tcp flags & (syn) == syn ct state new limit rate 50/second burst 100 packets counter log prefix "syn-flood: " drop
-
-        # UDP Flood Protection
         udp dport {domain, bootps} limit rate 100/second burst 200 packets counter log prefix "udp-flood: " drop
     }
 }
 EOF
 
-chmod +x $NFTABLES_SCRIPT
+chmod +x "$NFTABLES_SCRIPT"
 $NFTABLES_SCRIPT
 
-# === Buat ipset init script ===
+# === Buat ipset init ===
 echo -e "\n🔁 Membuat ipset init script..."
-cat > $IPSET_INIT <<'EOF'
+cat > "$IPSET_INIT" <<'EOF'
 #!/bin/bash
-
 ipset create blocked_ips hash:ip timeout 3600 2>/dev/null || true
 nft add rule inet filter input ip saddr @blocked_ips drop 2>/dev/null || true
 EOF
 
-chmod +x $IPSET_INIT
+chmod +x "$IPSET_INIT"
 $IPSET_INIT
 
-# === Buat log file jika belum ada ===
-touch $LOG_FILE
-chmod 644 $LOG_FILE
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
 
-# === Aktifkan Service ===
 echo -e "\n🟢 Mengaktifkan service systemd..."
 systemctl enable antiddosl3l4
 systemctl start antiddosl3l4
 
-# === Selesai ===
 echo -e "\n✅ INSTALASI SELESAI!"
 echo -e "📌 Anda bisa menggunakan:"
 echo -e "   - tail -f /var/log/antiddos.log => Melihat log aktivitas"
 echo -e "   - systemctl status antiddosl3l4 => Cek status service"
-echo -e ""
-echo -e "🔔 Webhook Discord sudah otomatis tersimpan!"
+echo -e "\n🔔 Webhook Discord sudah otomatis tersimpan!"
