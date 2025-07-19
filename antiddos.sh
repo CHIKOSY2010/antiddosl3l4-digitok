@@ -60,21 +60,24 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const axios = require('axios');
 
-const DISCORD_WEBHOOK = "$DISCORD_WEBHOOK";
-const BLOCK_DURATION = 3600;
-const MAX_BLOCK_PER_MIN = 5;
-const LOG_FILE = "$LOG_FILE";
+// Konfigurasi
+const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/xxxx/yyyy "; // Ganti dengan webhook asli kamu
+const BLOCK_DURATION = 3600; // 1 jam
+const MAX_BLOCK_PER_MIN = 5; // Maksimal blokir per menit
+const LOG_FILE = "/var/log/antiddos.log";
 
 const rateLimit = {};
 
+// Fungsi log dengan timestamp
 function log(message) {
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    console.log(\`[\${timestamp}] \${message}\`);
+    console.log(`[${timestamp}] ${message}`);
 }
 
+// Kirim notifikasi ke Discord
 function sendToDiscord(ip, attackType) {
     const timestamp = new Date().toISOString();
-    const message = \`\`[ANTI-DDOS]\` \`\${attackType}\` terdeteksi dari \`\${ip}\`\n\n🕒 Waktu: \${new Date().toLocaleString()}\`;
+    const message = `\`[ANTI-DDOS]\` \`${attackType}\` terdeteksi dari \`${ip}\`\n\n🕒 Waktu: ${new Date().toLocaleString()}`;
     const data = {
         embeds: [{
             title: "🚨 Serangan DDoS Terdeteksi",
@@ -86,60 +89,66 @@ function sendToDiscord(ip, attackType) {
     };
 
     axios.post(DISCORD_WEBHOOK, data).catch(err => {
-        log(\`[ERROR] Gagal kirim ke Discord: \${err.message}\`);
+        log(`[ERROR] Gagal kirim ke Discord: ${err.message}`);
     });
 }
 
+// Blokir IP menggunakan nft dan ipset
 function blockIP(ip) {
     if (isBlocked(ip)) return;
 
-    log(\`[BLOKIR] Mem-block IP \${ip}\`);
+    log(`[BLOKIR] Mem-block IP ${ip}`);
 
     try {
-        execSync(\`nft add rule inet filter input ip saddr \${ip} drop\`, { stdio: 'ignore' });
-        execSync(\`ipset add blocked_ips \${ip} timeout \${BLOCK_DURATION}\`, { stdio: 'ignore' });
+        execSync(`nft add rule inet filter input ip saddr ${ip} drop`, { stdio: 'ignore' });
+        execSync(`ipset add blocked_ips ${ip} timeout ${BLOCK_DURATION}`, { stdio: 'ignore' });
     } catch (err) {
-        log(\`[ERROR] Gagal block IP \${ip}: \${err.message}\`);
+        log(`[ERROR] Gagal block IP ${ip}: ${err.message}`);
     }
 
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    fs.appendFileSync(LOG_FILE, \`\${timestamp} | BLOKIR | \${ip} | Jenis: DDoS\n\`);
+    fs.appendFileSync(LOG_FILE, `${timestamp} | BLOKIR | ${ip} | Jenis: DDoS\n`);
     sendToDiscord(ip, "DDoS Attack");
 }
 
+// Cek apakah IP sudah diblokir
 function isBlocked(ip) {
     try {
-        const output = execSync(\`ipset test blocked_ips \${ip}\`, { stdio: 'pipe' }).toString();
+        const output = execSync(`ipset test blocked_ips ${ip}`, { stdio: 'pipe' }).toString();
         return output.includes("is in set");
     } catch {
         return false;
     }
 }
 
+// Ekstrak IP dari log kernel
 function extractIP(line) {
     const match = line.match(/SRC=(\d+\.\d+\.\d+\.\d+)/);
     return match ? match[1] : null;
 }
 
+// Rate limit untuk mencegah blokir berlebihan
 function rateLimited(ip) {
     const now = Date.now();
-    if (rateLimit[ip]) {
-        if (now - rateLimit[ip].time < 60000) {
-            rateLimit[ip].count++;
-            if (rateLimit[ip].count >= MAX_BLOCK_PER_MIN) {
-                rateLimit[ip].count = 0;
-                rateLimit[ip].time = now;
-                return true;
-            }
-        } else {
-            rateLimit[ip] = { time: now, count: 1 };
+    if (!rateLimit[ip]) {
+        rateLimit[ip] = { time: now, count: 1 };
+        return false;
+    }
+
+    if (now - rateLimit[ip].time < 60000) {
+        rateLimit[ip].count++;
+        if (rateLimit[ip].count >= MAX_BLOCK_PER_MIN) {
+            rateLimit[ip] = { time: now, count: 0 };
+            return true;
         }
     } else {
         rateLimit[ip] = { time: now, count: 1 };
     }
+
     return false;
 }
 
+// Monitor log kernel untuk deteksi serangan
 function monitorKernelLogs() {
     log("[INFO] Menjalankan Anti-DDoS L3/L4 Final Edition...");
     const { spawn } = require('child_process');
@@ -149,18 +158,18 @@ function monitorKernelLogs() {
         data.toString().split('\n').forEach(line => {
             const ip = extractIP(line);
             if (ip && /icmp-flood|syn-flood|udp-flood/.test(line)) {
-                log(\`[ALERT] Potensi DDoS dari IP: \${ip}\`);
+                log(`[ALERT] Potensi DDoS dari IP: ${ip}`);
                 if (!rateLimited(ip)) {
                     blockIP(ip);
                 } else {
-                    log(\`[RATE-LIMIT] IP \${ip} dilewati karena melebihi limit blokir per menit.\`);
+                    log(`[RATE-LIMIT] IP ${ip} dilewati karena melebihi limit blokir per menit.`);
                 }
             }
         });
     });
 
-    journal.stderr.on('data', (data) => log(\`[ERROR] journalctl stderr: \${data}\`));
-    journal.on('close', code => log(\`[INFO] Proses journalctl ditutup dengan kode: \${code}\`));
+    journal.stderr.on('data', (data) => log(`[ERROR] journalctl stderr: ${data}`));
+    journal.on('close', code => log(`[INFO] Proses journalctl ditutup dengan kode: ${code}`));
 }
 
 monitorKernelLogs();
